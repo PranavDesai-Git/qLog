@@ -2,29 +2,36 @@ package ui
 
 import (
 	"github.com/PranavDesai-Git/qLog/ui/chat"
+	"github.com/PranavDesai-Git/qLog/ui/manage"
 	"github.com/PranavDesai-Git/qLog/ui/menu"
+	"github.com/PranavDesai-Git/qLog/ui/settings"
 	"github.com/charmbracelet/bubbletea"
 )
 
 type sessionState int
 
-// STATE ENUM
 const (
 	menuView sessionState = iota
 	chatView
+	manageView
+	settingsView
 )
 
 type Manager struct {
-	state sessionState
-	menu  menu.Model
-	chat  chat.Model
+	state    sessionState
+	menu     menu.Model
+	chat     chat.Model
+	manage   manage.Model
+	settings settings.Model
 }
 
 func New() Manager {
 	return Manager{
-		state: menuView,
-		menu:  menu.New(),
-		chat:  chat.New(),
+		state:    menuView,
+		menu:     menu.New(),
+		chat:     chat.New(),
+		manage:   manage.New(),
+		settings: settings.New(),
 	}
 }
 
@@ -38,6 +45,12 @@ func (m Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case menu.SelectChatMessage:
 		m.state = chatView
 		return m, nil
+	case menu.SelectManageMessage:
+		m.state = manageView
+		return m, nil
+	case menu.SelectSettingsMessage:
+		m.state = settingsView
+		return m, nil
 	case tea.KeyMsg:
 		switch tmsg.String() {
 		case "ctrl+c", "q":
@@ -49,6 +62,18 @@ func (m Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newMenu, newCmd := m.menu.Update(msg)
 		m.menu = newMenu.(menu.Model)
 		cmd = newCmd
+	case chatView:
+		newChat, newCmd := m.chat.Update(msg)
+		m.chat = newChat.(chat.Model)
+		cmd = newCmd
+	case manageView:
+		newManage, newCmd := m.manage.Update(msg)
+		m.manage = newManage.(manage.Model)
+		cmd = newCmd
+	case settingsView:
+		newSettings, newCmd := m.settings.Update(msg)
+		m.settings = newSettings.(settings.Model)
+		cmd = newCmd
 	}
 	return m, cmd
 }
@@ -59,6 +84,10 @@ func (m Manager) View() string {
 		return m.menu.View()
 	case chatView:
 		return m.chat.View()
+	case manageView:
+		return m.manage.View()
+	case settingsView:
+		return m.settings.View()
 	}
 	return ""
 }
