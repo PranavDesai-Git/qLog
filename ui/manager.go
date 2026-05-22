@@ -54,5 +54,11 @@ func (m Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Manager) View() string {
-	return "manager"
+	switch m.state {
+	case menuView:
+		return m.menu.View()
+	case chatView:
+		return m.chat.View()
+	}
+	return ""
 }
