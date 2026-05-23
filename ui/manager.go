@@ -18,20 +18,22 @@ const (
 )
 
 type Manager struct {
-	state    sessionState
-	menu     menu.Model
-	chat     chat.Model
-	manage   manage.Model
-	settings settings.Model
+	state      sessionState
+	prevStates []sessionState
+	menu       menu.Model
+	chat       chat.Model
+	manage     manage.Model
+	settings   settings.Model
 }
 
 func New() *Manager {
 	return &Manager{
-		state:    menuView,
-		menu:     menu.New(),
-		chat:     chat.New(),
-		manage:   manage.New(),
-		settings: settings.New(),
+		state:      menuView,
+		prevStates: make([]sessionState, 0, 8),
+		menu:       menu.New(),
+		chat:       chat.New(),
+		manage:     manage.New(),
+		settings:   settings.New(),
 	}
 }
 
@@ -43,12 +45,15 @@ func (m *Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch tmsg := msg.(type) {
 	case menu.SelectChatMessage:
+		m.prevStates = append(m.prevStates, m.state)
 		m.state = chatView
 		return m, nil
 	case menu.SelectManageMessage:
+		m.prevStates = append(m.prevStates, m.state)
 		m.state = manageView
 		return m, nil
 	case menu.SelectSettingsMessage:
+		m.prevStates = append(m.prevStates, m.state)
 		m.state = settingsView
 		return m, nil
 	case tea.KeyMsg:
