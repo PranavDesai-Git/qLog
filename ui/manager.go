@@ -58,8 +58,19 @@ func (m *Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		switch tmsg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "esc":
+			if len(m.prevStates) > 0 {
+				lastElement := len(m.prevStates) - 1
+				m.state = m.prevStates[lastElement]
+				m.prevStates = m.prevStates[:lastElement]
+			}
+			return m, nil
+		case "shift+esc":
+			m.prevStates = m.prevStates[:0]
+			m.state = menuView
+			return m, nil
 		}
 	}
 	switch m.state {
