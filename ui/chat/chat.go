@@ -37,7 +37,7 @@ func openEditorCmd(prevMessage string) tea.Cmd {
 		return func() tea.Msg { return editorMsg{err: err} }
 	}
 
-	const devider = "\n\n--------CONTEXT ONLY ANYTHING FROM HERE WILL BE DISCARDED--------\n"
+	const devider = "--------CONTEXT ONLY ANYTHING FROM HERE WILL BE DISCARDED--------\n"
 
 	var initialContent strings.Builder
 
@@ -119,5 +119,5 @@ func (m Model) View() string {
 		editor = "nano"
 	}
 	infoMsg := fmt.Sprintf("press [i] to open %s and write a message. [esc] to go to prev screen", editor)
-	return fmt.Sprintf("%s\n%s",infoMsg, m.viewport.View())
+	return fmt.Sprintf("%s\n%s", infoMsg, m.viewport.View())
 }
