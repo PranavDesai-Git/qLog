@@ -5,7 +5,7 @@ import (
 	"github.com/PranavDesai-Git/qLog/ui/manage"
 	"github.com/PranavDesai-Git/qLog/ui/menu"
 	"github.com/PranavDesai-Git/qLog/ui/settings"
-	"github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type sessionState int
@@ -25,8 +25,8 @@ type Manager struct {
 	settings settings.Model
 }
 
-func New() Manager {
-	return Manager{
+func New() *Manager {
+	return &Manager{
 		state:    menuView,
 		menu:     menu.New(),
 		chat:     chat.New(),
@@ -35,11 +35,11 @@ func New() Manager {
 	}
 }
 
-func (m Manager) Init() tea.Cmd {
+func (m *Manager) Init() tea.Cmd {
 	return nil
 }
 
-func (m Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch tmsg := msg.(type) {
 	case menu.SelectChatMessage:
@@ -78,7 +78,7 @@ func (m Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Manager) View() string {
+func (m *Manager) View() string {
 	switch m.state {
 	case menuView:
 		return m.menu.View()
