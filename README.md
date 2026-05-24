@@ -50,11 +50,11 @@ But you can choose your own AIs.
 
 ## CHECKLIST
 
-- [ ] Complete the chat screen
+- [x] Complete the chat screen
 - [ ] Complete the saving to file part
 - [ ] Complete the module to read saved files
 - [ ] Write a markdown file parser
 - [ ] Complete the workflow to write to agenda file
 - [ ] Display agenda using the markdown parser
-- [ ] Complete the main menu
+- [x] Complete the main menu
 - [ ] Add fzf search for project files
