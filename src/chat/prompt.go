@@ -7,12 +7,12 @@ import (
 	"strings"
 )
 
-type Wrapper struct {
+type Prompt struct {
 	client *OllamaClient
 }
 
-func New(client *OllamaClient) *Wrapper {
-	return &Wrapper{
+func New(client *OllamaClient) *Prompt {
+	return &Prompt{
 		client: client,
 	}
 }
@@ -38,7 +38,7 @@ func fileInject(input *string) {
 	}
 }
 
-func (w *Wrapper) buildPrompt(input string) string {
+func (w *Prompt) BuildPrompt(input string) string {
 	modInput := input
 	fileInject(&modInput)
 	return modInput

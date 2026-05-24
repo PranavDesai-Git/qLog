@@ -1,9 +1,12 @@
 package chat
 
 import (
+	"context"
 	"fmt"
+	bchat "github.com/PranavDesai-Git/qLog/src/chat"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ollama/ollama/api"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,16 +17,27 @@ type editorMsg struct {
 	err     error
 }
 
-type Model struct {
-	viewport viewport.Model
-	messages []string
+type chunkMsg string
+type streamDoneMsg struct {
+	err error
 }
 
-func New() Model {
+type Model struct {
+	viewport     viewport.Model
+	messages     []string
+	aiHistory    []api.Message
+	client       *bchat.OllamaClient
+	streamChan   chan string
+	isGenerating bool
+}
+
+func New(client *bchat.OllamaClient) Model {
 	vp := viewport.New(60, 15)
 	return Model{
-		viewport: vp,
-		messages: []string{},
+		viewport:  vp,
+		messages:  []string{},
+		aiHistory: []api.Message{},
+		client:    client,
 	}
 }
 
@@ -73,6 +87,27 @@ func openEditorCmd(prevMessage string) tea.Cmd {
 
 		return editorMsg{content: userInput, err: nil}
 	})
+}
+
+func startStreamCmd(client *bchat.OllamaClient, history []api.Message, sub chan string) tea.Cmd {
+	return func() tea.Msg {
+		err := client.ChatStream(context.Background(), history, func(chunk string) error {
+			sub <- chunk
+			return nil
+		})
+		close(sub)
+		return streamDoneMsg{err: err}
+	}
+}
+
+func waitForChunk(sub chan string) tea.Cmd {
+	return func() tea.Msg {
+		chunk, ok := <-sub
+		if !ok {
+			return nil
+		}
+		return chunkMsg(chunk)
+	}
 }
 
 func (m Model) Init() tea.Cmd {

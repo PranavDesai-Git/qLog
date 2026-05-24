@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	m := ui.New()
+	m := ui.New("gemma3:4B")
 	p := tea.NewProgram(
 		m,
 		tea.WithAltScreen(),

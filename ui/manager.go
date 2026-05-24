@@ -1,6 +1,7 @@
 package ui
 
 import (
+	bchat "github.com/PranavDesai-Git/qLog/src/chat"
 	"github.com/PranavDesai-Git/qLog/ui/chat"
 	"github.com/PranavDesai-Git/qLog/ui/manage"
 	"github.com/PranavDesai-Git/qLog/ui/menu"
@@ -26,12 +27,16 @@ type Manager struct {
 	settings   settings.Model
 }
 
-func New() *Manager {
+func New(clientName string) *Manager {
+	ollamaClient, err := bchat.NewOllamaClient(clientName)
+	if err != nil {
+		panic(err)
+	}
 	return &Manager{
 		state:      menuView,
 		prevStates: make([]sessionState, 0, 8),
 		menu:       menu.New(),
-		chat:       chat.New(),
+		chat:       chat.New(ollamaClient),
 		manage:     manage.New(),
 		settings:   settings.New(),
 	}
