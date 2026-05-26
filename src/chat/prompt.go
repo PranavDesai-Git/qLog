@@ -7,15 +7,6 @@ import (
 	"strings"
 )
 
-type Prompt struct {
-	client *OllamaClient
-}
-
-func New(client *OllamaClient) *Prompt {
-	return &Prompt{
-		client: client,
-	}
-}
 
 var fileRegex = regexp.MustCompile(`\[\[(.*?)\]\]`)
 
@@ -38,7 +29,7 @@ func fileInject(input *string) {
 	}
 }
 
-func (w *Prompt) BuildPrompt(input string) string {
+func BuildPrompt(input string) string {
 	modInput := input
 	fileInject(&modInput)
 	return modInput

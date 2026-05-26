@@ -6,6 +6,7 @@ import (
 	bchat "github.com/PranavDesai-Git/qLog/src/chat"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/muesli/reflow/wordwrap"
 	"github.com/ollama/ollama/api"
 	"os"
 	"os/exec"
@@ -119,9 +120,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.viewport.Width = msg.Width
+		m.viewport.Height = msg.Height - 5
+		m.viewport.Style = m.viewport.Style.Width(msg.Width)
+		m.updateViewportContent()
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "i":
+			if m.isGenerating {
+				return m, nil
+			}
 			var prevMessage string
 			if len(m.messages) != 0 {
 				prevMessage = m.messages[len(m.messages)-1]
@@ -140,12 +149,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if input == "" {
 			return m, nil
 		}
-		m.messages = append(m.messages, input)
+
+		finalPrompt := bchat.BuildPrompt(input)
+
+		m.messages = append(m.messages, "\nYou:"+finalPrompt)
+		m.aiHistory = append(m.aiHistory, api.Message{
+			Role:    "user",
+			Content: finalPrompt,
+		})
+		m.messages = append(m.messages, "AI: ")
+		m.updateViewportContent()
+		m.viewport.GotoBottom()
+
+		m.isGenerating = true
+		m.streamChan = make(chan string)
+		return m, tea.Batch(
+			startStreamCmd(m.client, m.aiHistory, m.streamChan),
+			waitForChunk(m.streamChan),
+		)
+	case chunkMsg:
+		last := len(m.messages) - 1
+		m.messages[last] += string(msg)
+
 		m.viewport.SetContent(strings.Join(m.messages, "\n"))
 		m.viewport.GotoBottom()
+
+		return m, waitForChunk(m.streamChan)
+	case streamDoneMsg:
+		m.isGenerating = false
+		if msg.err != nil {
+			m.messages = append(m.messages, fmt.Sprintf("API ERR:%v", msg.err))
+			m.viewport.SetContent(strings.Join(m.messages, "\n"))
+		} else {
+			last := len(m.messages) - 1
+			finalText := strings.TrimPrefix(m.messages[last], "AI: ")
+
+			m.aiHistory = append(m.aiHistory, api.Message{
+				Role:    "assistant",
+				Content: finalText,
+			})
+		}
 		return m, nil
 	}
 	return m, vpCmd
+}
+
+func (m Model) updateViewportContent() {
+	fullText := strings.Join(m.messages, "\n")
+	wrapWidth := m.viewport.Width - 2
+	if wrapWidth < 1 {
+		wrapWidth = 1
+	}
+	wrappedText := wordwrap.String(fullText, wrapWidth)
+	m.viewport.SetContent(wrappedText)
 }
 
 func (m Model) View() string {
