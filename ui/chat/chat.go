@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,12 +25,16 @@ type editorMsg struct {
 
 type chunkMsg string
 type streamDoneMsg struct {
-	err error
+	projectName string
+	err         error
 }
 
 type startGenerationMsg struct{}
 
+type RequestPreviewMessage struct{}
+
 type Model struct {
+	projectName     string
 	width           int
 	height          int
 	viewport        viewport.Model
@@ -40,11 +45,13 @@ type Model struct {
 	streamChan      chan string
 	isGenerating    bool
 	isAiLoading     bool
+	isSaving        bool
+	saveStatus      string
 	spinner         spinner.Model
 	renderer        *glamour.TermRenderer
 }
 
-func New(client *bchat.OllamaClient) *Model {
+func New(client *bchat.OllamaClient, projectName string) *Model {
 	vp := viewport.New(60, 15)
 
 	r, err := glamour.NewTermRenderer(glamour.WithStyles(transparentStyle))
@@ -56,7 +63,12 @@ func New(client *bchat.OllamaClient) *Model {
 	s.Spinner = spinner.Dot
 	s.Style = spinnerStyle
 
+	if projectName == "" {
+		projectName = "untitled_project"
+	}
+
 	m := &Model{
+		projectName:     projectName,
 		viewport:        vp,
 		messages:        []string{},
 		renderedHistory: []string{},
@@ -66,10 +78,12 @@ func New(client *bchat.OllamaClient) *Model {
 		renderer:        r,
 	}
 
-	// Initialize the viewport with the onboarding message right away
 	m.updateViewportContent()
 	return m
 }
+
+func (m *Model) Client() *bchat.OllamaClient { return m.client }
+func (m *Model) ProjectName() string         { return m.projectName }
 
 func openEditorCmd(prevMessage string) tea.Cmd {
 	editor := os.Getenv("EDITOR")
@@ -88,7 +102,7 @@ func openEditorCmd(prevMessage string) tea.Cmd {
 
 	if prevMessage != "" {
 		initialContent.WriteString(divider)
-		initialContent.WriteString("PREVIOUS MESSAGE:\n")
+		initialContent.WriteString("CONTEXT / PREVIOUS MESSAGE:\n")
 		initialContent.WriteString(prevMessage + "\n")
 	}
 
@@ -125,6 +139,121 @@ func startStreamCmd(client *bchat.OllamaClient, history []api.Message, sub chan 
 		})
 		close(sub)
 		return streamDoneMsg{err: err}
+	}
+}
+
+func cleanMarkdownFences(s string) string {
+	s = strings.TrimSpace(s)
+
+	// Scan for the first and last occurrences of backtick arrays
+	firstIdx := strings.Index(s, "```")
+	lastIdx := strings.LastIndex(s, "```")
+
+	// If there is a distinct pair of code block boundaries anywhere in the output
+	if firstIdx != -1 && lastIdx != -1 && firstIdx != lastIdx {
+		// Extract only what's inside the bounding code block container
+		inner := s[firstIdx:lastIdx]
+
+		// Find the first newline to drop the code block language tag (e.g. ```markdown or ```md)
+		firstNewLine := strings.Index(inner, "\n")
+		if firstNewLine != -1 {
+			s = inner[firstNewLine+1:]
+		} else {
+			s = strings.TrimPrefix(inner, "```")
+			s = strings.TrimPrefix(s, "markdown")
+			s = strings.TrimPrefix(s, "md")
+		}
+	} else if strings.HasPrefix(s, "```") {
+		// Fallback clean-up if we only detected a prefix boundary
+		firstNewLine := strings.Index(s, "\n")
+		if firstNewLine != -1 {
+			s = s[firstNewLine+1:]
+		}
+		if strings.HasSuffix(s, "```") {
+			s = s[:len(s)-3]
+		}
+	}
+
+	return strings.TrimSpace(s)
+}
+
+func saveProjectLogCmd(client *bchat.OllamaClient, projectName string, currentHistory []api.Message) tea.Cmd {
+	return func() tea.Msg {
+		if len(currentHistory) == 0 {
+			return streamDoneMsg{err: fmt.Errorf("no conversation history to summarize yet")}
+		}
+
+		resolvedProjectName := projectName
+
+		// Generate context-driven hyphenated names if standard templates are matched
+		if projectName == "New Project" || projectName == "untitled_project" || projectName == "" {
+			namePrompt := []api.Message{
+				{
+					Role:    "user",
+					Content: "You are an automated file naming assistant. Based on our conversation above, generate a very short, slugified descriptive project slug (e.g., 'rest-api-client' or 'sqlite-migrator'). Output ONLY the lowercase hyphenated name. No extensions, no punctuation, no markdown, no fluff.",
+				},
+			}
+
+			fullContext := append(currentHistory, namePrompt...)
+			var nameSb strings.Builder
+			err := client.ChatStream(context.Background(), fullContext, func(chunk string) error {
+				nameSb.WriteString(chunk)
+				return nil
+			})
+			if err == nil && nameSb.Len() > 0 {
+				cleaned := strings.TrimSpace(nameSb.String())
+				cleaned = strings.Trim(cleaned, "`'\"")
+				cleaned = strings.ReplaceAll(cleaned, " ", "-")
+				cleaned = strings.ToLower(cleaned)
+
+				var validRunes []rune
+				for _, r := range cleaned {
+					if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+						validRunes = append(validRunes, r)
+					}
+				}
+				if len(validRunes) > 0 {
+					resolvedProjectName = string(validRunes)
+				}
+			}
+		}
+
+		summaryContext := make([]api.Message, len(currentHistory))
+		copy(summaryContext, currentHistory)
+
+		summaryContext = append(summaryContext, api.Message{
+			Role:    "user",
+			Content: "Analyze our entire dialogue above. Generate a structured, highly professional development log detailing major design decisions, structural changes, and code blocks discussed. You must write this exclusively in clean Markdown (.md) layout. Do not enclose your overall response in wrapping code fences or write back conversational fluff—return only raw markdown syntax elements.",
+		})
+
+		var sb strings.Builder
+		err := client.ChatStream(context.Background(), summaryContext, func(chunk string) error {
+			sb.WriteString(chunk)
+			return nil
+		})
+		if err != nil {
+			return streamDoneMsg{err: err}
+		}
+
+		// Clean up markdown fences and external chat-bot conversational noise
+		cleanedLog := cleanMarkdownFences(sb.String())
+
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return streamDoneMsg{err: err}
+		}
+
+		dirPath := filepath.Join(home, ".local", "qlog", "projects")
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			return streamDoneMsg{err: err}
+		}
+
+		filePath := filepath.Join(dirPath, fmt.Sprintf("%s.md", resolvedProjectName))
+		if err := os.WriteFile(filePath, []byte(cleanedLog), 0644); err != nil {
+			return streamDoneMsg{err: err}
+		}
+
+		return streamDoneMsg{projectName: resolvedProjectName, err: nil}
 	}
 }
 
@@ -166,9 +295,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			glamour.WithStyles(transparentStyle),
 			glamour.WithWordWrap(m.viewport.Width-2),
 		)
-		if !m.isGenerating {
-			m.rebuildCache()
-		}
+		m.rebuildCache()
 		m.updateViewportContent()
 
 	case spinner.TickMsg:
@@ -176,48 +303,71 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, spinCmd = m.spinner.Update(msg)
 		cmds = append(cmds, spinCmd)
 
-		if m.isAiLoading {
+		if m.isAiLoading || m.isSaving {
 			m.updateViewportContent()
 		}
 
 	case tea.KeyMsg:
-		logEvent("KEY", fmt.Sprintf("key=%q isGenerating=%v", msg.String(), m.isGenerating))
 		switch msg.String() {
+		case "ctrl+s":
+			if m.isGenerating || m.isAiLoading || m.isSaving {
+				return m, tea.Batch(cmds...)
+			}
+			m.isSaving = true
+			m.saveStatus = ""
+			m.updateViewportContent()
+			return m, tea.Batch(saveProjectLogCmd(m.client, m.projectName, m.aiHistory), m.spinner.Tick)
+
+		case "ctrl+o":
+			if m.isGenerating || m.isAiLoading || m.isSaving {
+				return m, tea.Batch(cmds...)
+			}
+			return m, func() tea.Msg { return RequestPreviewMessage{} }
+
 		case "i":
-			if m.isGenerating {
-				logEvent("KEY:i BLOCKED", "isGenerating=true, ignoring")
+			if m.isGenerating || m.isSaving {
 				return m, tea.Batch(cmds...)
 			}
 			var prevMessage string
 			if len(m.messages) != 0 {
 				prevMessage = m.messages[len(m.messages)-1]
 			}
-			logEvent("KEY:i", "opening editor", fmt.Sprintf("prevMessage_len=%d", len(prevMessage)))
 			cmds = append(cmds, openEditorCmd(prevMessage))
 			return m, tea.Batch(cmds...)
 		}
 
+	case streamDoneMsg:
+		m.isSaving = false
+		if msg.err != nil {
+			m.saveStatus = fmt.Sprintf("❌ Error auto-logging: %v", msg.err)
+			m.updateViewportContent()
+			cmds = append(cmds, tea.Tick(time.Second*4, func(t time.Time) tea.Msg {
+				return "clear_save_status"
+			}))
+			return m, tea.Batch(cmds...)
+		}
+
+		if msg.projectName != "" {
+			m.projectName = msg.projectName
+		}
+
+		return m, func() tea.Msg { return RequestPreviewMessage{} }
+
+	case string:
+		if msg == "clear_save_status" {
+			m.saveStatus = ""
+			m.updateViewportContent()
+		}
+
 	case editorMsg:
 		if msg.err != nil {
-			logEvent("EDITOR ERR", msg.err.Error())
 			m.appendAndCacheError(fmt.Sprintf("Error running editor: %v", msg.err))
 			return m, tea.Batch(cmds...)
 		}
-
 		input := strings.TrimSpace(msg.content)
-		logEvent("EDITOR DONE", fmt.Sprintf("raw_len=%d trimmed_len=%d", len(msg.content), len(input)))
-
 		if input == "" {
-			logEvent("EDITOR EMPTY", "user submitted nothing, aborting")
 			return m, tea.Batch(cmds...)
 		}
-
-		logEvent("EDITOR CONTENT PREVIEW", fmt.Sprintf("%q", func() string {
-			if len(input) > 80 {
-				return input[:80] + "..."
-			}
-			return input
-		}()))
 
 		finalPrompt := bchat.BuildPrompt(input)
 		userMsg := "**You:**\n" + finalPrompt
@@ -225,13 +375,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, userMsg)
 		renderedUser, err := m.renderer.Render(userMsg)
 		if err != nil {
-			logEvent("RENDER ERR", fmt.Sprintf("failed to render user msg: %v", err))
 			m.renderedHistory = append(m.renderedHistory, userMsg+"\n")
 		} else {
 			m.renderedHistory = append(m.renderedHistory, renderedUser)
 		}
-
-		logEvent("USER MSG CACHED", fmt.Sprintf("messages=%d renderedHistory=%d", len(m.messages), len(m.renderedHistory)))
 
 		m.aiHistory = append(m.aiHistory, api.Message{
 			Role:    "user",
@@ -239,17 +386,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		m.isGenerating = true
-
 		m.updateViewportContent()
 		m.viewport.GotoBottom()
-		logEvent("DISPATCHING startGenerationMsg")
+
 		cmds = append(cmds, tea.Tick(time.Millisecond*16, func(t time.Time) tea.Msg {
 			return startGenerationMsg{}
 		}))
 		return m, tea.Batch(cmds...)
 
 	case startGenerationMsg:
-		logEvent("GENERATION START", "spinner on, stream starting")
 		m.isAiLoading = true
 		m.streamChan = make(chan string)
 		return m, tea.Batch(
@@ -259,9 +404,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case chunkMsg:
-		logEvent("CHUNK", fmt.Sprintf("len=%d isAiLoading=%v", len(msg), m.isAiLoading))
 		if m.isAiLoading {
-			logEvent("CHUNK FIRST", "spinner off, starting AI message")
 			m.isAiLoading = false
 			m.messages = append(m.messages, "**AI:**\n"+string(msg))
 		} else {
@@ -276,42 +419,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		cmds = append(cmds, waitForChunk(m.streamChan))
 
-	case streamDoneMsg:
-		logEvent("STREAM DONE", fmt.Sprintf("err=%v messages=%d renderedHistory=%d", msg.err, len(m.messages), len(m.renderedHistory)))
-		m.isGenerating = false
-
-		if msg.err != nil {
-			m.isAiLoading = false
-			logEvent("STREAM ERR", msg.err.Error())
-			m.appendAndCacheError(fmt.Sprintf("\nAPI ERR: %v\n", msg.err))
-		} else {
-			if m.isAiLoading {
-				logEvent("STREAM DONE EMPTY", "no chunks received, rendering empty response")
-				m.isAiLoading = false
-				m.messages = append(m.messages, "**AI:**\n*(Empty response)*")
-			}
-
-			last := len(m.messages) - 1
-			if last >= 0 && len(m.messages) > len(m.renderedHistory) {
-				finalText := m.messages[last]
-				logEvent("CACHING AI MSG", fmt.Sprintf("msg_len=%d", len(finalText)))
-
-				renderedAI, err := m.renderer.Render(finalText)
-				if err != nil {
-					logEvent("RENDER ERR", fmt.Sprintf("failed to render AI msg: %v", err))
-					m.renderedHistory = append(m.renderedHistory, finalText+"\n")
-				} else {
-					m.renderedHistory = append(m.renderedHistory, renderedAI)
-				}
-
-				cleanHistoryText := strings.TrimPrefix(finalText, "**AI:**\n")
-				m.aiHistory = append(m.aiHistory, api.Message{
-					Role:    "assistant",
-					Content: cleanHistoryText,
-				})
-				logEvent("AI MSG CACHED", fmt.Sprintf("messages=%d renderedHistory=%d aiHistory=%d", len(m.messages), len(m.renderedHistory), len(m.aiHistory)))
-			}
+	case tea.Msg:
+		if _, ok := msg.(streamDoneMsg); !ok {
+			break
 		}
+		m.isGenerating = false
+		m.isAiLoading = false
 		m.updateViewportContent()
 		m.viewport.GotoBottom()
 	}
@@ -320,38 +433,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) rebuildCache() {
-	logEvent("REBUILD CACHE", fmt.Sprintf("rebuilding %d messages", len(m.messages)))
 	m.renderedHistory = make([]string, 0, len(m.messages))
-	for i, msg := range m.messages {
+	for _, msg := range m.messages {
 		rendered, err := m.renderer.Render(msg)
 		if err != nil {
-			logEvent("REBUILD CACHE ERR", fmt.Sprintf("msg[%d]: %v", i, err))
 			m.renderedHistory = append(m.renderedHistory, msg+"\n")
 		} else {
 			m.renderedHistory = append(m.renderedHistory, rendered)
 		}
 	}
-	logEvent("REBUILD CACHE DONE", fmt.Sprintf("renderedHistory=%d", len(m.renderedHistory)))
 }
 
 func (m *Model) appendAndCacheError(errMsg string) {
-	logEvent("ERROR APPENDED", fmt.Sprintf("%q", errMsg))
 	m.messages = append(m.messages, errMsg)
 	m.renderedHistory = append(m.renderedHistory, errMsg+"\n")
 	m.updateViewportContent()
 }
 
 func (m *Model) updateViewportContent() {
-	logEvent("RENDER",
-		fmt.Sprintf("msgs=%d rendered=%d isGenerating=%v isAiLoading=%v scrollPct=%.2f",
-			len(m.messages), len(m.renderedHistory), m.isGenerating, m.isAiLoading, m.viewport.ScrollPercent()))
-
 	var fullContent strings.Builder
 
-	// Display Onboarding/Help Text box when there are no active chat messages
 	if len(m.messages) == 0 && !m.isGenerating && !m.isAiLoading {
 		welcomeMarkdown := "💡 **Assistant Core Ready**\n\n" +
 			"• press `i` to chat\n" +
+			"• `ctrl+s` to have AI compile/write markdown logs\n" +
+			"• `ctrl+o` to show the output log file window\n" +
 			"• `esc` to go back\n" +
 			"• `shift+esc` to go back to menu\n" +
 			"• `ctrl+c` to exit"
@@ -400,6 +506,13 @@ func (m *Model) updateViewportContent() {
 		fullContent.WriteString(aiMsgStyle.Render(spinnerFrame + " Thinking...") + "\n\n")
 	}
 
+	if m.isSaving {
+		spinnerFrame := m.spinner.View()
+		fullContent.WriteString(infoStyle.Render(spinnerFrame + " Writing files..."))
+	} else if m.saveStatus != "" {
+		fullContent.WriteString(infoStyle.Render(m.saveStatus))
+	}
+
 	m.viewport.SetContent(fullContent.String())
 }
 
@@ -413,7 +526,7 @@ func (m *Model) View() string {
 		editor = "nano"
 	}
 
-	infoMsg := fmt.Sprintf("Press [i] to open %s and write a message. [esc] to go to prev screen", editor)
+	infoMsg := fmt.Sprintf("Press [i] open %s | [ctrl+s] AI Save Log | [ctrl+o] Open File Window", editor)
 
 	content := containerStyle.Render(
 		lipgloss.JoinVertical(lipgloss.Left,
@@ -433,3 +546,5 @@ func (m *Model) View() string {
 			),
 		)
 }
+
+func logEvent(category, message string, extra ...string) {}

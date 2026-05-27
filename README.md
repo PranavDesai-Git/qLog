@@ -1,7 +1,4 @@
 # qLog
-> [!IMPORTANT]
-> Incomplete, Working in Public
-
 🗒 plan your day not like a pleb
 
 ## Why?
@@ -53,8 +50,12 @@ But you can choose your own AIs.
 - [x] Complete the chat screen
 - [ ] Complete the saving to file part
 - [ ] Complete the module to read saved files
-- [ ] Write a markdown file parser
+- [x] Write a markdown file parser
 - [ ] Complete the workflow to write to agenda file
-- [ ] Display agenda using the markdown parser
+- [x] Display agenda using the markdown parser
 - [x] Complete the main menu
 - [ ] Add fzf search for project files
+
+
+> [!NOTE]
+> WIP, up to usable standard
