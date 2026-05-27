@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/ollama/ollama/api"
+	"os"
 )
 
 type OllamaClient struct {
@@ -11,7 +12,17 @@ type OllamaClient struct {
 	model  string
 }
 
+func (oc *OllamaClient) Preload(ctx context.Context) error {
+	req := &api.GenerateRequest{
+		Model: oc.model,
+	}
+
+	return oc.client.Generate(ctx, req, func(resp api.GenerateResponse) error {
+		return nil
+	})
+}
 func NewOllamaClient(model string) (*OllamaClient, error) {
+	os.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
 		return nil, err
