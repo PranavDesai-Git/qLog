@@ -22,7 +22,7 @@ type Manager struct {
 	state      sessionState
 	prevStates []sessionState
 	menu       menu.Model
-	chat       chat.Model
+	chat       *chat.Model
 	manage     manage.Model
 	settings   settings.Model
 }
@@ -85,7 +85,7 @@ func (m *Manager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd = newCmd
 	case chatView:
 		newChat, newCmd := m.chat.Update(msg)
-		m.chat = newChat.(chat.Model)
+		m.chat = newChat.(*chat.Model)
 		cmd = newCmd
 	case manageView:
 		newManage, newCmd := m.manage.Update(msg)

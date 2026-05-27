@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	m := ui.New("hf.co/MaziyarPanahi/Llama-3.2-3B-Instruct-uncensored-GGUF:Q8_0")
+	m := ui.New("gemma3:1b")
 	p := tea.NewProgram(
 		m,
 		tea.WithAltScreen(),

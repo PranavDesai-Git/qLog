@@ -3,14 +3,16 @@ package chat
 import (
 	"context"
 	"fmt"
-	bchat "github.com/PranavDesai-Git/qLog/src/chat"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/muesli/reflow/wordwrap"
-	"github.com/ollama/ollama/api"
 	"os"
 	"os/exec"
 	"strings"
+
+	bchat "github.com/PranavDesai-Git/qLog/src/chat"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/ollama/ollama/api"
 )
 
 type editorMsg struct {
@@ -24,21 +26,34 @@ type streamDoneMsg struct {
 }
 
 type Model struct {
-	viewport     viewport.Model
-	messages     []string
-	aiHistory    []api.Message
-	client       *bchat.OllamaClient
-	streamChan   chan string
-	isGenerating bool
+	viewport        viewport.Model
+	messages        []string
+	renderedHistory []string
+	aiHistory       []api.Message
+	client          *bchat.OllamaClient
+	streamChan      chan string
+	isGenerating    bool
+	isAiLoading     bool
+	spinner         spinner.Model
+	renderer        *glamour.TermRenderer
 }
 
-func New(client *bchat.OllamaClient) Model {
+func New(client *bchat.OllamaClient) *Model {
 	vp := viewport.New(60, 15)
-	return Model{
-		viewport:  vp,
-		messages:  []string{},
-		aiHistory: []api.Message{},
-		client:    client,
+	r, err := glamour.NewTermRenderer(glamour.WithAutoStyle())
+	if err != nil {
+		panic(err)
+	}
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	return &Model{
+		viewport:        vp,
+		messages:        []string{},
+		renderedHistory: []string{},
+		aiHistory:       []api.Message{},
+		client:          client,
+		spinner:         s,
+		renderer:        r,
 	}
 }
 
@@ -52,14 +67,13 @@ func openEditorCmd(prevMessage string) tea.Cmd {
 		return func() tea.Msg { return editorMsg{err: err} }
 	}
 
-	const devider = "--------CONTEXT ONLY ANYTHING FROM HERE WILL BE DISCARDED--------\n"
+	const divider = "--------CONTEXT ONLY ANYTHING FROM HERE WILL BE DISCARDED--------\n"
 
 	var initialContent strings.Builder
-
 	initialContent.WriteString("\n\n")
 
 	if prevMessage != "" {
-		initialContent.WriteString(devider)
+		initialContent.WriteString(divider)
 		initialContent.WriteString("PREVIOUS MESSAGE:\n")
 		initialContent.WriteString(prevMessage + "\n")
 	}
@@ -67,7 +81,6 @@ func openEditorCmd(prevMessage string) tea.Cmd {
 	if _, err := tempFile.WriteString(initialContent.String()); err != nil {
 		return func() tea.Msg { return editorMsg{err: err} }
 	}
-
 	tempFile.Close()
 
 	c := exec.Command(editor, tempFile.Name())
@@ -77,13 +90,13 @@ func openEditorCmd(prevMessage string) tea.Cmd {
 		}
 
 		bytes, readErr := os.ReadFile(tempFile.Name())
-		defer os.Remove(tempFile.Name())
+		defer os.Remove(tempFile.Name()) // Clean up after reading
 		if readErr != nil {
 			return editorMsg{err: readErr}
 		}
 
 		fileContent := string(bytes)
-		parts := strings.Split(fileContent, devider)
+		parts := strings.Split(fileContent, divider)
 		userInput := strings.TrimSpace(parts[0])
 
 		return editorMsg{content: userInput, err: nil}
@@ -111,20 +124,38 @@ func waitForChunk(sub chan string) tea.Cmd {
 	}
 }
 
-func (m Model) Init() tea.Cmd {
+func (m *Model) Init() tea.Cmd {
 	return nil
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var vpCmd tea.Cmd
 	m.viewport, vpCmd = m.viewport.Update(msg)
+
+	var spinCmd tea.Cmd
+	if m.isAiLoading {
+		m.spinner, spinCmd = m.spinner.Update(msg)
+	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height - 5
 		m.viewport.Style = m.viewport.Style.Width(msg.Width)
+
+		m.renderer, _ = glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(m.viewport.Width-2),
+		)
+		m.rebuildCache()
 		m.updateViewportContent()
+
+	case spinner.TickMsg:
+		if m.isAiLoading {
+			m.updateViewportContent()
+			return m, spinCmd
+		}
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "i":
@@ -137,78 +168,136 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, openEditorCmd(prevMessage)
 		}
+
 	case editorMsg:
 		if msg.err != nil {
-			m.messages = append(m.messages, fmt.Sprintf("Error running editor: %v", msg.err))
-			m.viewport.SetContent(strings.Join(m.messages, "\n"))
+			m.appendAndCacheError(fmt.Sprintf("Error running editor: %v", msg.err))
 			return m, nil
 		}
 
 		input := strings.TrimSpace(msg.content)
-
 		if input == "" {
 			return m, nil
 		}
 
 		finalPrompt := bchat.BuildPrompt(input)
+		userMsg := "**You:**\n" + finalPrompt
+		
+		m.messages = append(m.messages, userMsg)
+		
+		renderedUser, _ := m.renderer.Render(userMsg)
+		m.renderedHistory = append(m.renderedHistory, renderedUser)
 
-		m.messages = append(m.messages, "\nYou:"+finalPrompt)
 		m.aiHistory = append(m.aiHistory, api.Message{
 			Role:    "user",
 			Content: finalPrompt,
 		})
-		m.messages = append(m.messages, "AI: ")
+		
+		m.isGenerating = true
+		m.isAiLoading = true
+		
+		m.messages = append(m.messages, "**AI:**\n")
+
 		m.updateViewportContent()
 		m.viewport.GotoBottom()
 
-		m.isGenerating = true
 		m.streamChan = make(chan string)
 		return m, tea.Batch(
 			startStreamCmd(m.client, m.aiHistory, m.streamChan),
 			waitForChunk(m.streamChan),
+			m.spinner.Tick,
 		)
+
 	case chunkMsg:
+		if m.isAiLoading {
+			m.isAiLoading = false
+		}
 		last := len(m.messages) - 1
 		m.messages[last] += string(msg)
-
-		m.viewport.SetContent(strings.Join(m.messages, "\n"))
-		m.viewport.GotoBottom()
-
+		m.updateViewportContent()
+		
+		if m.viewport.ScrollPercent() > 0.9 {
+			m.viewport.GotoBottom()
+		}
 		return m, waitForChunk(m.streamChan)
+
 	case streamDoneMsg:
 		m.isGenerating = false
+		m.isAiLoading = false
+		
 		if msg.err != nil {
-			m.messages = append(m.messages, fmt.Sprintf("API ERR:%v", msg.err))
-			m.viewport.SetContent(strings.Join(m.messages, "\n"))
+			m.appendAndCacheError(fmt.Sprintf("API ERR: %v", msg.err))
 		} else {
 			last := len(m.messages) - 1
-			finalText := strings.TrimPrefix(m.messages[last], "AI: ")
+			finalText := m.messages[last]
+			
+			renderedAI, err := m.renderer.Render(finalText)
+			if err != nil {
+				m.renderedHistory = append(m.renderedHistory, finalText+"\n")
+			} else {
+				m.renderedHistory = append(m.renderedHistory, renderedAI)
+			}
 
+			cleanHistoryText := strings.TrimPrefix(finalText, "**AI:**\n")
 			m.aiHistory = append(m.aiHistory, api.Message{
 				Role:    "assistant",
-				Content: finalText,
+				Content: cleanHistoryText,
 			})
 		}
+		m.updateViewportContent()
 		return m, nil
 	}
-	return m, vpCmd
+	return m, tea.Batch(vpCmd, spinCmd)
 }
 
-func (m Model) updateViewportContent() {
-	fullText := strings.Join(m.messages, "\n")
-	wrapWidth := m.viewport.Width - 2
-	if wrapWidth < 1 {
-		wrapWidth = 1
+func (m *Model) rebuildCache() {
+	m.renderedHistory = make([]string, 0, len(m.messages))
+	for _, msg := range m.messages {
+		rendered, err := m.renderer.Render(msg)
+		if err != nil {
+			m.renderedHistory = append(m.renderedHistory, msg+"\n")
+		} else {
+			m.renderedHistory = append(m.renderedHistory, rendered)
+		}
 	}
-	wrappedText := wordwrap.String(fullText, wrapWidth)
-	m.viewport.SetContent(wrappedText)
 }
 
-func (m Model) View() string {
+func (m *Model) appendAndCacheError(errMsg string) {
+	m.messages = append(m.messages, errMsg)
+	m.renderedHistory = append(m.renderedHistory, errMsg+"\n")
+	m.updateViewportContent()
+}
+
+func (m *Model) updateViewportContent() {
+	var fullContent strings.Builder
+
+	for _, rendered := range m.renderedHistory {
+		fullContent.WriteString(rendered)
+	}
+
+	if m.isGenerating && len(m.messages) > len(m.renderedHistory) {
+		currentMsg := m.messages[len(m.messages)-1]
+		rendered, err := m.renderer.Render(currentMsg)
+		if err != nil {
+			fullContent.WriteString(currentMsg + "\n")
+		} else {
+			fullContent.WriteString(rendered)
+		}
+	}
+	if m.isAiLoading {
+		spinnerFrame := m.spinner.View()
+		fullContent.WriteString(spinnerFrame + " Thinking...")
+	}
+
+	m.viewport.SetContent(fullContent.String())
+}
+
+// Changed to pointer receiver for consistency
+func (m *Model) View() string {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
 		editor = "nano"
 	}
-	infoMsg := fmt.Sprintf("press [i] to open %s and write a message. [esc] to go to prev screen", editor)
+	infoMsg := fmt.Sprintf("Press [i] to open %s and write a message. [esc] to go to prev screen", editor)
 	return fmt.Sprintf("%s\n%s", infoMsg, m.viewport.View())
 }
